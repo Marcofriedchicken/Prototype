@@ -32,6 +32,24 @@ function formatSlot(date: string, time: string) {
   return `${date} ${time} (Asia/Manila)`
 }
 
+// Service duration mapping (in hours)
+const SERVICE_DURATIONS: Record<string, number> = {
+  "Premium Carwash": 1,
+  "Engine Wash": 2,
+  "Full Detailing": 4,
+  "BAC-2-Zero": 2,
+  "Paint Protection": 3,
+  "Ceramic Coating": 8, // Blocks 8 hours (6am to 2pm)
+}
+
+function getServiceDuration(serviceTitle: string): number {
+  return SERVICE_DURATIONS[serviceTitle] || 1 // Default to 1 hour if not found
+}
+
+function overlaps(startA: string, endA: string, startB: string, endB: string) {
+  return startA < endB && endA > startB
+}
+
 export async function POST(request: Request) {
   try {
     const payload = (await request.json()) as BookingPayload
@@ -91,10 +109,57 @@ export async function POST(request: Request) {
       try {
         const calendarId = getCalendarId()
         const calendar = getCalendarClient()
-        const startDateTime = `${payload.appointmentDate}T${payload.appointmentTime}:00+08:00`
-        const startHour = Number(payload.appointmentTime.split(":")[0])
-        const endHour = String(startHour + 1).padStart(2, "0")
-        const endDateTime = `${payload.appointmentDate}T${endHour}:00:00+08:00`
+        const serviceDuration = getServiceDuration(payload.serviceTitle)
+
+        let startDateTime: string
+        let endDateTime: string
+
+        if (payload.serviceTitle === "Ceramic Coating") {
+          // Block 8 hours: 6:00 AM to 2:00 PM
+          startDateTime = `${payload.appointmentDate}T06:00:00+08:00`
+          endDateTime = `${payload.appointmentDate}T14:00:00+08:00`
+        } else {
+          // Normal service: start at selected time, end after duration
+          startDateTime = `${payload.appointmentDate}T${payload.appointmentTime}:00+08:00`
+          const startHour = Number(payload.appointmentTime.split(":")[0])
+          const endHour = startHour + serviceDuration
+          const endTimeStr = `${String(endHour).padStart(2, "0")}:00`
+          endDateTime = `${payload.appointmentDate}T${endTimeStr}:00+08:00`
+        }
+
+        // Check availability for the full duration before booking
+        const dayStart = `${payload.appointmentDate}T00:00:00+08:00`
+        const dayEnd = `${payload.appointmentDate}T23:59:59+08:00`
+        const eventsResponse = await calendar.events.list({
+          calendarId,
+          timeMin: dayStart,
+          timeMax: dayEnd,
+          singleEvents: true,
+          orderBy: 'startTime',
+        })
+        const events = eventsResponse.data.items || []
+
+        // Check each hour of the service duration
+        let isAvailable = true
+        for (let hour = 0; hour < serviceDuration; hour++) {
+          const slotStartHour = payload.serviceTitle === "Ceramic Coating" ? 6 + hour : Number(payload.appointmentTime.split(":")[0]) + hour
+          const slotStart = `${payload.appointmentDate}T${String(slotStartHour).padStart(2, "0")}:00:00+08:00`
+          const slotEnd = `${payload.appointmentDate}T${String(slotStartHour + 1).padStart(2, "0")}:00:00+08:00`
+
+          const overlappingEvents = events.filter((event) => {
+            if (!event.start?.dateTime || !event.end?.dateTime) return false
+            return slotStart < event.end.dateTime && slotEnd > event.start.dateTime
+          })
+
+          if (overlappingEvents.length >= 4) {
+            isAvailable = false
+            break
+          }
+        }
+
+        if (!isAvailable) {
+          return NextResponse.json({ error: "Selected time slot is not available for the full service duration." }, { status: 400 })
+        }
 
         const event = await calendar.events.insert({
           calendarId,

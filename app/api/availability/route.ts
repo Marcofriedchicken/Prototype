@@ -2,14 +2,18 @@ import { NextResponse } from "next/server"
 import { getCalendarClient, getCalendarId } from "@/lib/google-calendar"
 
 const SLOT_HOURS = [
+  "06:00",
+  "07:00",
   "08:00",
   "09:00",
   "10:00",
   "11:00",
+  "12:00",
   "13:00",
   "14:00",
   "15:00",
   "16:00",
+  "17:00",
 ]
 
 const GOOGLE_ENV_KEYS = [
@@ -51,16 +55,16 @@ export async function GET(request: Request) {
     const dayStart = `${date}T00:00:00+08:00`
     const dayEnd = `${date}T23:59:59+08:00`
 
-    const busyResponse = await calendar.freebusy.query({
-      requestBody: {
-        timeMin: dayStart,
-        timeMax: dayEnd,
-        timeZone: "Asia/Manila",
-        items: [{ id: calendarId }],
-      },
+    // Get all events for the day to count bay occupancy
+    const eventsResponse = await calendar.events.list({
+      calendarId,
+      timeMin: dayStart,
+      timeMax: dayEnd,
+      singleEvents: true,
+      orderBy: 'startTime',
     })
 
-    const busy = busyResponse.data.calendars?.[calendarId]?.busy || []
+    const events = eventsResponse.data.items || []
 
     const availableSlots = SLOT_HOURS.filter((slotStart) => {
       const start = toIso(date, slotStart)
@@ -68,10 +72,14 @@ export async function GET(request: Request) {
       const endHour = Number(hour) + 1
       const end = toIso(date, `${String(endHour).padStart(2, "0")}:00`)
 
-      return !busy.some((period) => {
-        if (!period.start || !period.end) return false
-        return overlaps(start, end, period.start, period.end)
+      // Count how many events overlap with this slot
+      const overlappingEvents = events.filter((event) => {
+        if (!event.start?.dateTime || !event.end?.dateTime) return false
+        return overlaps(start, end, event.start.dateTime, event.end.dateTime)
       })
+
+      // Available if fewer than 4 bays are occupied
+      return overlappingEvents.length < 4
     })
 
     return NextResponse.json({ date, slots: availableSlots })
